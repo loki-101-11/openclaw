@@ -26,6 +26,7 @@ import {
   resolveShellEnvFallbackTimeoutMs,
 } from "../infra/shell-env.js";
 import { enqueueSystemEvent } from "../infra/system-events.js";
+import { sendMessage } from "../infra/outbound/message.js";
 import { logInfo, logWarn } from "../logger.js";
 import { formatSpawnError, spawnWithFallback } from "../process/spawn-utils.js";
 import { parseAgentSessionKey, resolveAgentIdFromSessionKey } from "../routing/session-key.js";
@@ -373,6 +374,43 @@ function applyShellPath(env: Record<string, string>, shellPath?: string | null) 
   }
 }
 
+function maybeNotifyDiscord(sessionKey: string | undefined, text: string) {
+  const key = sessionKey?.trim();
+  if (!key) {
+    return;
+  }
+  const parts = key.split(":");
+  if (parts[0] !== "agent" || parts.length < 4) {
+    return;
+  }
+  const channel = parts[2];
+  if (channel !== "discord") {
+    return;
+  }
+  const kind = parts[3];
+  const id = parts.slice(4).join(":");
+  if (!id) {
+    return;
+  }
+
+  let to: string;
+  if (kind === "direct" || kind === "dm") {
+    to = `user:${id}`;
+  } else if (kind === "channel" || kind === "group") {
+    to = `channel:${id}`;
+  } else {
+    return;
+  }
+
+  void sendMessage({
+    content: text,
+    to,
+    channel: "discord",
+  }).catch((err) => {
+    logWarn(`exec: failed to send Discord notification: ${err}`);
+  });
+}
+
 function maybeNotifyOnExit(session: ProcessSession, status: "completed" | "failed") {
   if (!session.backgrounded || !session.notifyOnExit || session.exitNotified) {
     return;
@@ -392,6 +430,7 @@ function maybeNotifyOnExit(session: ProcessSession, status: "completed" | "faile
     ? `Exec ${status} (${session.id.slice(0, 8)}, ${exitLabel}) :: ${output}`
     : `Exec ${status} (${session.id.slice(0, 8)}, ${exitLabel})`;
   enqueueSystemEvent(summary, { sessionKey });
+  maybeNotifyDiscord(sessionKey, summary);
   requestHeartbeatNow({ reason: `exec:${session.id}:exit` });
 }
 
@@ -415,6 +454,7 @@ function emitExecSystemEvent(text: string, opts: { sessionKey?: string; contextK
     return;
   }
   enqueueSystemEvent(text, { sessionKey, contextKey: opts.contextKey });
+  maybeNotifyDiscord(sessionKey, text);
   requestHeartbeatNow({ reason: "exec-event" });
 }
 
